@@ -2505,13 +2505,9 @@ def render_interactive_stage_tiles(play_id: str, scene_df: pd.DataFrame) -> None
         # 选中后通过放大方块和提高不透明度突出显示。
         selected=dict(marker=dict(opacity=1.0, size=64)),
         unselected=dict(marker=dict(opacity=0.42)),
-        hovertemplate=(
-            "<b>%{customdata[2]}</b><br>"
-            "叙事阶段：%{customdata[1]}<br>"
-            "剧情强度：%{customdata[3]:.2f}<br>"
-            "节奏指数：%{customdata[4]:.2f}<br>"
-            "%{customdata[5]}<extra></extra>"
-        ),
+        # 关闭悬浮提示，避免点击后信息框遮挡整行方块。
+        # 场次解释统一在图表下方的详情卡片中展示。
+        hoverinfo="skip",
         name="场次",
         showlegend=False,
     ))
@@ -2543,6 +2539,7 @@ def render_interactive_stage_tiles(play_id: str, scene_df: pd.DataFrame) -> None
         ),
         dragmode="select",
         clickmode="event+select",
+        hovermode=False,
     )
     fig.update_xaxes(
         visible=False,
@@ -2555,7 +2552,7 @@ def render_interactive_stage_tiles(play_id: str, scene_df: pd.DataFrame) -> None
         fixedrange=True,
     )
 
-    st.caption("操作：直接点击单个方块；使用框选或套索可一次选择多个场次。再次框选可更新个例集合。")
+    st.caption("操作：点击单个方块，或使用框选/套索选择多个场次；所选场次的解释会统一显示在方块矩阵下方。")
     try:
         event = st.plotly_chart(
             fig,
@@ -2570,7 +2567,7 @@ def render_interactive_stage_tiles(play_id: str, scene_df: pd.DataFrame) -> None
         # 兼容较旧 Streamlit：图仍可显示，但不支持图中点选。
         st.plotly_chart(
             fig,
-            use_container_width=True,
+            width="stretch",
             key=f"q4_stage_tiles_fallback_{play_id}",
             config={"displaylogo": False, "scrollZoom": False},
         )
@@ -2604,13 +2601,19 @@ def render_interactive_stage_tiles(play_id: str, scene_df: pd.DataFrame) -> None
             scene_name = str(row.get("scene_label", "关键场次"))
             intensity_value = fmt_num(row.get("intensity_std", np.nan), 2)
             rhythm_value = fmt_num(row.get("rhythm_std", np.nan), 2)
+            preview_text = str(row.get("preview_std", "")).strip()
+            if preview_text in ["", "nan", "None"]:
+                preview_text = "暂无文本摘要"
+            preview_text = preview_text[:110] + ("……" if len(preview_text) > 110 else "")
             stage_color = color_map.get(stage, "#999999")
             with col:
                 card_html = (
-                    f'<div class="stage-card" style="border-top:4px solid {stage_color};">'
+                    f'<div class="stage-card" style="border-top:4px solid {stage_color}; min-height:170px;">'
                     f'<div class="stage-card-title">{html.escape(stage)}｜{html.escape(scene_name)}</div>'
                     f'<div class="stage-card-score">剧情强度：{intensity_value}</div>'
                     f'<div class="stage-card-score">节奏指数：{rhythm_value}</div>'
+                    f'<div style="margin-top:10px;font-size:12px;line-height:1.65;color:#5e554d;">'
+                    f'{html.escape(preview_text)}</div>'
                     f'</div>'
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
@@ -2624,7 +2627,7 @@ def render_interactive_stage_tiles(play_id: str, scene_df: pd.DataFrame) -> None
             "rhythm_std": "节奏指数",
             "preview_std": "文本摘要",
         })
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.dataframe(display_df, width="stretch", hide_index=True)
 
 
 def plot_narrative_stage_timeline(play_id: str, scene_df: pd.DataFrame) -> None:
