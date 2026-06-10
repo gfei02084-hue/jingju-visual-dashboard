@@ -2423,6 +2423,208 @@ def infer_narrative_stages(scene_df: pd.DataFrame, play_id: str) -> pd.DataFrame
     return sub
 
 
+def render_interactive_stage_tiles(play_id: str, scene_df: pd.DataFrame) -> None:
+    """
+    将第四问图1改成可多选的“场次方块矩阵”。
+    - 每个方块代表一个场次；
+    - 颜色代表开端、发展、转折、高潮、结局；
+    - 支持单击、框选、套索多选；
+    - 下方自动展示选中场次的个例卡片。
+    """
+    sub = infer_narrative_stages(scene_df, play_id)
+    if sub.empty:
+        st.info("该剧缺少场次数据，无法生成场次矩阵。")
+        return
+
+    scene_col = first_existing(sub, ["scene_name", "scene_marker", "scene_order"])
+    preview_col = first_existing(sub, ["scene_text_preview", "scene_text", "场次文本", "文本预览"])
+    intensity_col = first_existing(sub, ["intensity_score", "剧情强度"])
+    rhythm_col = first_existing(sub, ["rhythm_score", "节奏指数"])
+
+    sub = sub.reset_index(drop=True).copy()
+    sub["scene_label"] = (
+        sub[scene_col].fillna("").astype(str)
+        if scene_col else pd.Series([f"第{i + 1}场" for i in range(len(sub))])
+    )
+    sub["scene_label"] = [
+        label if label and label not in ["nan", "None"] else f"第{i + 1}场"
+        for i, label in enumerate(sub["scene_label"].tolist())
+    ]
+    sub["intensity_std"] = (
+        pd.to_numeric(sub[intensity_col], errors="coerce").fillna(0)
+        if intensity_col else 0.0
+    )
+    sub["rhythm_std"] = (
+        pd.to_numeric(sub[rhythm_col], errors="coerce").fillna(0)
+        if rhythm_col else 0.0
+    )
+    sub["preview_std"] = (
+        sub[preview_col].fillna("").astype(str)
+        if preview_col else ""
+    )
+
+    # 每行最多放 10 个方块；剧本较长时自动换行，适合页面与截图展示。
+    columns_per_row = 10 if len(sub) > 10 else max(len(sub), 1)
+    sub["grid_x"] = np.arange(len(sub)) % columns_per_row
+    sub["grid_y"] = -(np.arange(len(sub)) // columns_per_row)
+
+    color_map = {
+        "开端": "#315B7D",
+        "发展": "#6C9A8B",
+        "转折": "#C89B3C",
+        "高潮": "#8C1D18",
+        "结局": "#8B6F9C",
+        "单场": "#999999",
+    }
+    marker_colors = [color_map.get(str(stage), "#999999") for stage in sub["stage_std"]]
+
+    customdata = np.column_stack([
+        np.arange(len(sub)),
+        sub["stage_std"].astype(str),
+        sub["scene_label"].astype(str),
+        sub["intensity_std"].astype(float),
+        sub["rhythm_std"].astype(float),
+        sub["preview_std"].astype(str).str.slice(0, 180),
+    ])
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=sub["grid_x"],
+        y=sub["grid_y"],
+        mode="markers+text",
+        text=sub["scene_label"],
+        textposition="middle center",
+        customdata=customdata,
+        marker=dict(
+            symbol="square",
+            size=54,
+            color=marker_colors,
+            line=dict(color="rgba(255,255,255,0.95)", width=2),
+        ),
+        selected=dict(marker=dict(opacity=1.0, line=dict(color="#C89B3C", width=5))),
+        unselected=dict(marker=dict(opacity=0.48)),
+        hovertemplate=(
+            "<b>%{customdata[2]}</b><br>"
+            "叙事阶段：%{customdata[1]}<br>"
+            "剧情强度：%{customdata[3]:.2f}<br>"
+            "节奏指数：%{customdata[4]:.2f}<br>"
+            "%{customdata[5]}<extra></extra>"
+        ),
+        name="场次",
+        showlegend=False,
+    ))
+
+    # 单独添加图例，不影响点选索引。
+    for stage, color in color_map.items():
+        if stage not in sub["stage_std"].astype(str).unique():
+            continue
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers",
+            marker=dict(symbol="square", size=13, color=color),
+            name=stage,
+            hoverinfo="skip",
+        ))
+
+    row_count = int(np.ceil(len(sub) / columns_per_row))
+    chart_height = max(260, 125 + row_count * 90)
+    fig.update_layout(
+        title="图1｜叙事场次矩阵：点击或框选多个场次进行个例分析",
+        height=chart_height,
+        margin=dict(l=20, r=20, t=65, b=25),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(255,253,248,0.58)",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom", y=1.01,
+            xanchor="right", x=1,
+            title="叙事阶段",
+        ),
+        dragmode="select",
+        clickmode="event+select",
+    )
+    fig.update_xaxes(
+        visible=False,
+        range=[-0.65, max(columns_per_row - 0.35, 0.65)],
+        fixedrange=True,
+    )
+    fig.update_yaxes(
+        visible=False,
+        range=[-row_count + 0.35, 0.65],
+        fixedrange=True,
+    )
+
+    st.caption("操作：直接点击单个方块；使用框选或套索可一次选择多个场次。再次框选可更新个例集合。")
+    try:
+        event = st.plotly_chart(
+            fig,
+            width="stretch",
+            key=f"q4_stage_tiles_{play_id}",
+            on_select="rerun",
+            selection_mode=("points", "box", "lasso"),
+            config={"displaylogo": False, "scrollZoom": False},
+        )
+        selected_indices = list(event.selection.point_indices) if event and event.selection else []
+    except TypeError:
+        # 兼容较旧 Streamlit：图仍可显示，但不支持图中点选。
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            key=f"q4_stage_tiles_fallback_{play_id}",
+            config={"displaylogo": False, "scrollZoom": False},
+        )
+        selected_indices = []
+        st.warning("当前 Streamlit 版本较旧，图中多选未启用。请升级：python -m pip install -U streamlit")
+
+    # 未选择时，默认展示每个阶段剧情强度最高的代表场次。
+    if selected_indices:
+        selected = sub.iloc[[i for i in selected_indices if 0 <= i < len(sub)]].copy()
+        section_title(f"已选择 {len(selected)} 个场次｜个例展示")
+    else:
+        representative_rows = []
+        for stage in ["开端", "发展", "转折", "高潮", "结局"]:
+            part = sub[sub["stage_std"].astype(str) == stage]
+            if part.empty:
+                continue
+            representative_rows.append(part.sort_values("intensity_std", ascending=False).iloc[0])
+        selected = pd.DataFrame(representative_rows).drop_duplicates(subset=["scene_label"])
+        section_title("代表性场次｜点击上方方块可改为自定义多选")
+
+    if selected.empty:
+        return
+
+    # 最多展示 10 个，避免页面过长；每行 5 张小卡片。
+    selected = selected.head(10).reset_index(drop=True)
+    for start in range(0, len(selected), 5):
+        batch = selected.iloc[start:start + 5]
+        cols = st.columns(len(batch), gap="small")
+        for col, (_, row) in zip(cols, batch.iterrows()):
+            stage = str(row.get("stage_std", "发展"))
+            scene_name = str(row.get("scene_label", "关键场次"))
+            intensity_value = fmt_num(row.get("intensity_std", np.nan), 2)
+            rhythm_value = fmt_num(row.get("rhythm_std", np.nan), 2)
+            stage_color = color_map.get(stage, "#999999")
+            with col:
+                card_html = (
+                    f'<div class="stage-card" style="border-top:4px solid {stage_color};">'
+                    f'<div class="stage-card-title">{html.escape(stage)}｜{html.escape(scene_name)}</div>'
+                    f'<div class="stage-card-score">剧情强度：{intensity_value}</div>'
+                    f'<div class="stage-card-score">节奏指数：{rhythm_value}</div>'
+                    f'</div>'
+                )
+                st.markdown(card_html, unsafe_allow_html=True)
+
+    with st.expander("查看所选场次的文本摘要", expanded=False):
+        show_cols = ["scene_label", "stage_std", "intensity_std", "rhythm_std", "preview_std"]
+        display_df = selected[show_cols].rename(columns={
+            "scene_label": "场次",
+            "stage_std": "叙事阶段",
+            "intensity_std": "剧情强度",
+            "rhythm_std": "节奏指数",
+            "preview_std": "文本摘要",
+        })
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+
 def plot_narrative_stage_timeline(play_id: str, scene_df: pd.DataFrame) -> None:
     sub = infer_narrative_stages(scene_df, play_id)
     if sub.empty:
@@ -2926,10 +3128,8 @@ def render_question4(fused: pd.DataFrame, prepared: Dict[str, pd.DataFrame], pla
     ])
     scene_df = prepared["scene"]
 
-    # 图1：明确识别开端、发展、转折、高潮、结局
-    plot_narrative_stage_timeline(play_id, scene_df)
-    section_title("关键阶段与高强度场次")
-    render_key_stage_cards(play_id, scene_df)
+    # 图1：用可多选场次方块矩阵识别开端、发展、转折、高潮、结局
+    render_interactive_stage_tiles(play_id, scene_df)
 
     # 图2、图3：剧情起伏与表演形式
     c1, c2 = st.columns(2, gap="small")
